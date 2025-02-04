@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx ."
+    "dev": "tsx src",
+    "dev:new": "tsx src/newImplementation.ts"
   },
   "keywords": [],
   "author": "",
