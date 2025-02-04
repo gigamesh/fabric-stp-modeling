@@ -1,7 +1,8 @@
 interface SimulationResults {
   totalPaid: number;
   totalRewardsEarned: number;
-  totalClientFees: number; // Added this field
+  totalClientFees: number;
+  totalCreatorEarnings: number; // Added this field
   roi: number;
   monthlyBreakdown: Array<{
     month: number;
@@ -10,7 +11,8 @@ interface SimulationResults {
     multiplier: number;
     monthlyReward: number;
     totalRewardPool: number;
-    clientFees: number; // Added this field
+    clientFees: number;
+    creatorEarnings: number; // Added this field
   }>;
 }
 
@@ -20,9 +22,9 @@ const DEFAULT_CONFIG = {
   clientFeeBasisPoints: 500, // 5%
   protocolFeeBasisPoints: 100, // 1%
   initialSubscribers: 30,
-  annualGrowthRate: 5,
+  annualGrowthRate: 3,
   months: 60, // 5 years
-  formulaBase: 1.2, // 20% decay per month
+  decayRate: 1.5,
   minMultiplier: 0,
   subscriberStartMonth: 0,
   subscriberMonths: 60,
@@ -52,6 +54,14 @@ function calculateRewards(config = DEFAULT_CONFIG): SimulationResults {
   const rewardPoolMultiplier = config.rewardPoolBasisPoints / MAX_BPS;
   const clientFeeMultiplier = config.clientFeeBasisPoints / MAX_BPS;
 
+  // Calculate creator's base earnings multiplier (what's left after all fees and reward pool)
+  const creatorEarningsMultiplier =
+    (MAX_BPS -
+      config.rewardPoolBasisPoints -
+      config.clientFeeBasisPoints -
+      config.protocolFeeBasisPoints) /
+    MAX_BPS;
+
   // Base contribution for minimum payment
   const baseRewardPoolContribution =
     config.monthlyFeeUSD * feeMultiplier * rewardPoolMultiplier;
@@ -59,6 +69,7 @@ function calculateRewards(config = DEFAULT_CONFIG): SimulationResults {
   let totalPaid = 0;
   let totalRewardsEarned = 0;
   let totalClientFees = 0;
+  let totalCreatorEarnings = 0;
   const monthlyBreakdown: SimulationResults["monthlyBreakdown"] = [];
 
   // For each month in the simulation
@@ -73,7 +84,7 @@ function calculateRewards(config = DEFAULT_CONFIG): SimulationResults {
     if (monthsPassed >= config.months) {
       multiplier = config.minMultiplier;
     } else {
-      multiplier = Math.pow(config.formulaBase, config.months - monthsPassed);
+      multiplier = Math.pow(config.decayRate, config.months - monthsPassed);
       if (multiplier < config.minMultiplier) multiplier = config.minMultiplier;
     }
 
@@ -94,6 +105,11 @@ function calculateRewards(config = DEFAULT_CONFIG): SimulationResults {
     const monthlyClientFees =
       subscribers * config.monthlyFeeUSD * clientFeeMultiplier;
     totalClientFees += monthlyClientFees;
+
+    // Calculate creator's monthly earnings (before rewards)
+    const monthlyCreatorEarnings =
+      subscribers * config.monthlyFeeUSD * creatorEarningsMultiplier;
+    totalCreatorEarnings += monthlyCreatorEarnings;
 
     // Add our subscription payment to total paid
     totalPaid += config.monthlyFeeUSD * config.paymentMultiplier;
@@ -117,6 +133,7 @@ function calculateRewards(config = DEFAULT_CONFIG): SimulationResults {
       monthlyReward,
       totalRewardPool,
       clientFees: monthlyClientFees,
+      creatorEarnings: monthlyCreatorEarnings,
     });
   }
 
@@ -126,6 +143,7 @@ function calculateRewards(config = DEFAULT_CONFIG): SimulationResults {
     totalPaid,
     totalRewardsEarned,
     totalClientFees,
+    totalCreatorEarnings,
     roi,
     monthlyBreakdown,
   };
@@ -139,7 +157,12 @@ const baseResults = calculateRewards({
 });
 
 console.log(`ROI: ${baseResults.roi.toFixed(2)}%`);
-console.log(`Total Client Fees: $${baseResults.totalClientFees.toFixed(2)}`);
+console.log(
+  `Total Client Fees: $${formatCurrency(baseResults.totalClientFees)}`
+);
+console.log(
+  `Total Creator Earnings: $${formatCurrency(baseResults.totalCreatorEarnings)}`
+);
 console.log(
   `Monthly reward (first month): $${baseResults.monthlyBreakdown[0].monthlyReward.toFixed(
     2
@@ -156,6 +179,11 @@ console.log(`Total paid: $${formatCurrency(doubleResults.totalPaid)}`);
 console.log(
   `Total Client Fees: $${formatCurrency(doubleResults.totalClientFees)}`
 );
+console.log(
+  `Total Creator Earnings: $${formatCurrency(
+    doubleResults.totalCreatorEarnings
+  )}`
+);
 console.log(`ROI: ${doubleResults.roi.toFixed(2)}%`);
 console.log(
   `Total rewards earned: $${formatCurrency(doubleResults.totalRewardsEarned)}`
@@ -171,22 +199,31 @@ console.log(`Total paid: $${formatCurrency(fiveXResults.totalPaid)}`);
 console.log(
   `Total Client Fees: $${formatCurrency(fiveXResults.totalClientFees)}`
 );
+console.log(
+  `Total Creator Earnings: $${formatCurrency(
+    fiveXResults.totalCreatorEarnings
+  )}`
+);
 console.log(`ROI: ${fiveXResults.roi.toFixed(2)}%`);
 console.log(
   `Total rewards earned: $${formatCurrency(fiveXResults.totalRewardsEarned)}`
 );
 
-console.log("\nDetailed Monthly Breakdown (first 12 months of 5x payment):");
+console.log("\nDetailed Monthly Breakdown (all months with 5x payment):");
+console.log(
+  "\nMonth | Subscribers | Reward Pool | Multiplier | Rewards Earned | Client Fees | Creator Earnings"
+);
+console.log(
+  "-------|-------------|--------------|------------|----------------|-------------|----------------"
+);
 fiveXResults.monthlyBreakdown.forEach((month) => {
   console.log(
-    `Month ${
-      month.month
-    }: ${month.subscribers.toLocaleString()} subs, reward pool: $${formatCurrency(
-      month.totalRewardPool
-    )}, ${month.multiplier.toFixed(
-      2
-    )}x multiplier, $${month.monthlyReward.toFixed(
-      2
-    )} earned, Client Fees: $${formatCurrency(month.clientFees)}`
+    `${month.month.toString().padStart(5)} | ` +
+      `${month.subscribers.toLocaleString().padEnd(11)} | ` +
+      `${formatCurrency(month.totalRewardPool).padEnd(10)} | ` +
+      `${month.multiplier.toFixed(2).padEnd(10)} | ` +
+      `${formatCurrency(month.monthlyReward).padEnd(12)} | ` +
+      `${formatCurrency(month.clientFees).padEnd(9)} | ` +
+      `${formatCurrency(month.creatorEarnings)}`
   );
 });
