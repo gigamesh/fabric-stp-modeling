@@ -1,6 +1,5 @@
 import { formatNum } from "./helpers";
 
-// Types remain the same as before
 interface TierConfig {
   rewardBasisPoints: number;
   initialMintPrice: number;
@@ -47,9 +46,10 @@ interface SubscriptionState {
   clientEarnings: number;
 }
 
-const ONE_YEAR_DAYS = 365;
-const ONE_MONTH_DAYS = 30;
-const ONE_MONTH_SECONDS = ONE_MONTH_DAYS * 24 * 60 * 60;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+const DAYS_PER_MONTH = 30;
+const SECONDS_PER_MONTH = DAYS_PER_MONTH * SECONDS_PER_DAY;
+const DAYS_PER_YEAR = 365;
 const MAX_BPS = 10_000;
 const AVG_SUB_MONTHS = 12;
 const INITIAL_SUBSCRIBERS = 50;
@@ -64,7 +64,6 @@ class SubscriptionModel {
     this.tier = tier;
     this.curve = curve;
     this.fees = fees;
-
     this.state = this.getInitialState();
   }
 
@@ -81,7 +80,7 @@ class SubscriptionModel {
 
   private calculateMultiplier(timestamp: number): number {
     const periodsElapsed = Math.floor(
-      (timestamp - this.curve.startTimestamp) / ONE_MONTH_SECONDS
+      (timestamp - this.curve.startTimestamp) / SECONDS_PER_MONTH
     );
 
     if (periodsElapsed >= this.curve.numPeriods) {
@@ -105,11 +104,11 @@ class SubscriptionModel {
     timestamp: number;
     subscriptionDays: number;
   }): void {
-    const subscriptionMonths = subscriptionDays / ONE_MONTH_DAYS;
-    const subscriptionSeconds = subscriptionMonths * ONE_MONTH_SECONDS;
+    const subscriptionMonths = subscriptionDays / DAYS_PER_MONTH;
+    const subscriptionSeconds = subscriptionDays * SECONDS_PER_DAY;
     const payment =
       this.tier.initialMintPrice +
-      subscriptionMonths * this.tier.pricePerPeriod; // Fix: Calculate payment based on months, not seconds
+      subscriptionMonths * this.tier.pricePerPeriod;
 
     const protocolFee = (payment * this.fees.protocolBps) / MAX_BPS;
     const clientFee = (payment * this.fees.clientBps) / MAX_BPS;
@@ -117,7 +116,7 @@ class SubscriptionModel {
 
     const rewardAmount = (netPayment * this.tier.rewardBasisPoints) / MAX_BPS;
     const multiplier = this.calculateMultiplier(timestamp);
-    // Scale shares by subscription length to reward longer subscriptions
+
     const shares = rewardAmount * multiplier * (subscriptionMonths / 12);
 
     this.state.subscribers.set(address, {
@@ -139,8 +138,6 @@ class SubscriptionModel {
     const subscriber = this.state.subscribers.get(address);
     if (!subscriber) return 0;
 
-    // Still calculate rewards even if expired - they earned them during their subscription
-    // Only check if the subscription hasn't started yet
     if (currentTimestamp < subscriber.subscriptionStart) {
       return 0;
     }
@@ -160,8 +157,7 @@ class SubscriptionModel {
       };
 
     const rewards = this.calculateRewards(address, currentTimestamp);
-    // ROI calculation was incorrect - should be (rewards/spent - 1) * 100
-    // But we were calculating ((rewards/spent) * 100) - 1
+
     return {
       roi: (rewards / subscriber.totalSpent - 1) * 100,
       spent: subscriber.totalSpent,
@@ -180,19 +176,16 @@ class SubscriptionModel {
     monthlyGrowthRate: number;
     testSubscriptionDays: number;
   }): SimulationResult[] {
-    // Reset state for fresh simulation
     this.state = this.getInitialState();
 
-    // Add initial subscribers
     for (let i = 0; i < INITIAL_SUBSCRIBERS; i++) {
       this.addSubscriber({
         address: `subscriber-${i + 1}`,
         timestamp: startTimestamp,
-        subscriptionDays: AVG_SUB_MONTHS * ONE_MONTH_DAYS,
+        subscriptionDays: AVG_SUB_MONTHS * DAYS_PER_MONTH,
       });
     }
 
-    // Add test subscriber at the start
     const testAddress = "test-subscriber";
     this.addSubscriber({
       address: testAddress,
@@ -204,34 +197,29 @@ class SubscriptionModel {
     let currentSubs = this.state.subscribers.size;
 
     for (let month = 1; month <= months; month++) {
-      const timestamp = startTimestamp + month * ONE_MONTH_SECONDS;
+      const timestamp = startTimestamp + month * SECONDS_PER_MONTH;
       const newSubs = Math.floor(currentSubs * monthlyGrowthRate);
 
-      // Add new subscribers
       for (let i = 0; i < newSubs; i++) {
         this.addSubscriber({
           address: `subscriber-${this.state.subscribers.size + 1}`,
           timestamp,
-          subscriptionDays: AVG_SUB_MONTHS * ONE_MONTH_DAYS,
+          subscriptionDays: AVG_SUB_MONTHS * DAYS_PER_MONTH,
         });
       }
 
-      // Calculate metrics
       let totalRoi = 0;
       let totalRewards = 0;
       this.state.subscribers.forEach((_, address) => {
         if (address !== testAddress) {
-          // Exclude test subscriber from averages
           const analysis = this.calculateROI(address, timestamp);
           totalRoi += analysis.roi;
           totalRewards += analysis.rewards;
         }
       });
 
-      const regularSubCount = this.state.subscribers.size - 1; // Exclude test subscriber
+      const regularSubCount = this.state.subscribers.size - 1;
       const testAnalysis = this.calculateROI(testAddress, timestamp);
-
-      // Calculate total rewards including test subscriber
       const testRewards = this.calculateRewards(testAddress, timestamp);
       const totalPoolRewards = totalRewards + testRewards;
 
@@ -242,7 +230,7 @@ class SubscriptionModel {
         creatorEarnings: this.state.creatorBalance,
         clientEarnings: this.state.clientEarnings,
         protocolEarnings: this.state.protocolEarnings,
-        subscriberRewards: totalPoolRewards, // Include all rewards
+        subscriberRewards: totalPoolRewards,
         testSubscriberRoi: testAnalysis.roi,
       });
 
@@ -253,11 +241,10 @@ class SubscriptionModel {
   }
 }
 
-// Initialize model with same parameters
 const startTime = Math.floor(Date.now() / 1000);
 
 const tier: TierConfig = {
-  rewardBasisPoints: 2_000, // 20%
+  rewardBasisPoints: 2_000,
   initialMintPrice: 0,
   pricePerPeriod: 5,
 };
@@ -270,25 +257,23 @@ const curve: CurveConfig = {
 };
 
 const fees: FeeConfig = {
-  protocolBps: 100, // 1%
-  clientBps: 500, // 5%
+  protocolBps: 100,
+  clientBps: 500,
 };
 
-// Initialize model
 const model = new SubscriptionModel(tier, curve, fees);
 
-// Test different subscription lengths
-const subscriptionLengths = [
-  60, // 2 months
-  180, // 6 months
-  ONE_YEAR_DAYS, // 1 year
-  ONE_YEAR_DAYS * 2, // 2 years
-  ONE_YEAR_DAYS * 25, // Simulate yolo investment
+const subscriptionLengthDays = [
+  60,
+  180,
+  DAYS_PER_YEAR,
+  DAYS_PER_YEAR * 2,
+  DAYS_PER_YEAR * 25,
 ];
 
-// Run simulations for each scenario
 console.log("\nAnalyzing scenarios with different subscription lengths:");
-subscriptionLengths.forEach((days) => {
+
+subscriptionLengthDays.forEach((days) => {
   const results = model.simulateScenario({
     startTimestamp: startTime,
     months: curve.numPeriods,
@@ -296,7 +281,6 @@ subscriptionLengths.forEach((days) => {
     testSubscriptionDays: days,
   });
 
-  // Output final month results
   const finalResult = results[results.length - 1];
   const testSub = model.state.subscribers.get("test-subscriber");
   console.log(`\n${days} day subscription scenario:`);
@@ -310,13 +294,10 @@ subscriptionLengths.forEach((days) => {
     `- Test subscriber spent: $${formatNum(testSub?.totalSpent || 0)}`
   );
   console.log(
-    `- Test subscriber shares: ${formatNum(testSub?.rewardShares || 0)}`
-  );
-  console.log(
     `- Test subscriber rewards: $${formatNum(
       model.calculateRewards(
         "test-subscriber",
-        startTime + curve.numPeriods * ONE_MONTH_SECONDS
+        startTime + curve.numPeriods * SECONDS_PER_MONTH
       )
     )}`
   );
