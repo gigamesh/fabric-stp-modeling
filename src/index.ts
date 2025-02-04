@@ -1,229 +1,330 @@
-interface SimulationResults {
-  totalPaid: number;
-  totalRewardsEarned: number;
-  totalClientFees: number;
-  totalCreatorEarnings: number; // Added this field
-  roi: number;
-  monthlyBreakdown: Array<{
-    month: number;
-    subscribers: number;
-    rewardPoolContribution: number;
-    multiplier: number;
-    monthlyReward: number;
-    totalRewardPool: number;
-    clientFees: number;
-    creatorEarnings: number; // Added this field
-  }>;
+import { formatNum } from "./helpers";
+
+// Types remain the same as before
+interface TierConfig {
+  rewardBasisPoints: number;
+  initialMintPrice: number;
+  pricePerPeriod: number;
 }
 
-const DEFAULT_CONFIG = {
-  monthlyFeeUSD: 5,
-  rewardPoolBasisPoints: 2000, // 20%
-  clientFeeBasisPoints: 500, // 5%
-  protocolFeeBasisPoints: 100, // 1%
-  initialSubscribers: 30,
-  annualGrowthRate: 3,
-  months: 60, // 5 years
-  decayRate: 1.5,
-  minMultiplier: 0,
-  subscriberStartMonth: 0,
-  subscriberMonths: 60,
-  paymentMultiplier: 1, // How many times the base fee our subscriber pays
-  avgPaymentMultiplier: 1.2, // Average payment multiplier across all subscribers
-};
-
-export const formatCurrency = (num: number, decimals: number = 2) => {
-  return new Intl.NumberFormat("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: decimals,
-  }).format(num);
-};
-
-function calculateMonthlyGrowthRate(annualMultiplier: number): number {
-  return Math.pow(annualMultiplier, 1 / 12) - 1;
+interface CurveConfig {
+  numPeriods: number;
+  formulaBase: number;
+  startTimestamp: number;
+  minMultiplier: number;
 }
 
-function calculateRewards(config = DEFAULT_CONFIG): SimulationResults {
-  const monthlyGrowthRate = calculateMonthlyGrowthRate(config.annualGrowthRate);
-  const MAX_BPS = 10000;
+interface FeeConfig {
+  protocolBps: number;
+  clientBps: number;
+}
 
-  // Calculate portion of subscription that goes to reward pool after fees
-  const feeMultiplier =
-    (MAX_BPS - config.clientFeeBasisPoints - config.protocolFeeBasisPoints) /
-    MAX_BPS;
-  const rewardPoolMultiplier = config.rewardPoolBasisPoints / MAX_BPS;
-  const clientFeeMultiplier = config.clientFeeBasisPoints / MAX_BPS;
+interface Subscriber {
+  tierId: number;
+  subscriptionStart: number;
+  expiresAt: number;
+  rewardShares: number;
+  totalSpent: number;
+}
 
-  // Calculate creator's base earnings multiplier (what's left after all fees and reward pool)
-  const creatorEarningsMultiplier =
-    (MAX_BPS -
-      config.rewardPoolBasisPoints -
-      config.clientFeeBasisPoints -
-      config.protocolFeeBasisPoints) /
-    MAX_BPS;
+interface SimulationResult {
+  month: number;
+  subscribers: number;
+  avgRoi: number;
+  creatorEarnings: number;
+  clientEarnings: number;
+  protocolEarnings: number;
+  subscriberRewards: number;
+  testSubscriberRoi?: number;
+}
 
-  // Base contribution for minimum payment
-  const baseRewardPoolContribution =
-    config.monthlyFeeUSD * feeMultiplier * rewardPoolMultiplier;
+interface SubscriptionState {
+  subscribers: Map<string, Subscriber>;
+  rewardPool: number;
+  totalShares: number;
+  creatorBalance: number;
+  protocolEarnings: number;
+  clientEarnings: number;
+}
 
-  let totalPaid = 0;
-  let totalRewardsEarned = 0;
-  let totalClientFees = 0;
-  let totalCreatorEarnings = 0;
-  const monthlyBreakdown: SimulationResults["monthlyBreakdown"] = [];
+const ONE_YEAR_DAYS = 365;
+const ONE_MONTH_DAYS = 30;
+const ONE_MONTH_SECONDS = ONE_MONTH_DAYS * 24 * 60 * 60;
+const MAX_BPS = 10_000;
+const AVG_SUB_MONTHS = 12;
+const INITIAL_SUBSCRIBERS = 50;
 
-  // For each month in the simulation
-  for (let month = 0; month < config.months; month++) {
-    // Calculate number of subscribers for this month using compound growth
-    const subscribers =
-      config.initialSubscribers * Math.pow(1 + monthlyGrowthRate, month);
+class SubscriptionModel {
+  public state: SubscriptionState;
+  private tier: TierConfig;
+  private curve: CurveConfig;
+  private fees: FeeConfig;
 
-    // Calculate reward curve multiplier
-    const monthsPassed = month;
-    let multiplier = 1;
-    if (monthsPassed >= config.months) {
-      multiplier = config.minMultiplier;
-    } else {
-      multiplier = Math.pow(config.decayRate, config.months - monthsPassed);
-      if (multiplier < config.minMultiplier) multiplier = config.minMultiplier;
-    }
+  constructor(tier: TierConfig, curve: CurveConfig, fees: FeeConfig) {
+    this.tier = tier;
+    this.curve = curve;
+    this.fees = fees;
 
-    // Our subscriber's monthly contribution based on their payment multiplier
-    const ourMonthlyContribution =
-      baseRewardPoolContribution * config.paymentMultiplier;
-
-    // Calculate average contribution per subscriber (excluding our subscriber)
-    const avgContribution =
-      baseRewardPoolContribution * config.avgPaymentMultiplier;
-
-    // Calculate total reward pool for the month, accounting for variable payments
-    const totalRewardPool =
-      (subscribers - 1) * avgContribution + // All other subscribers
-      ourMonthlyContribution; // Our subscriber
-
-    // Calculate client fees for all subscribers
-    const monthlyClientFees =
-      subscribers * config.monthlyFeeUSD * clientFeeMultiplier;
-    totalClientFees += monthlyClientFees;
-
-    // Calculate creator's monthly earnings (before rewards)
-    const monthlyCreatorEarnings =
-      subscribers * config.monthlyFeeUSD * creatorEarningsMultiplier;
-    totalCreatorEarnings += monthlyCreatorEarnings;
-
-    // Add our subscription payment to total paid
-    totalPaid += config.monthlyFeeUSD * config.paymentMultiplier;
-
-    // Calculate total weighted shares, accounting for payment amounts
-    const totalWeightedShares =
-      (subscribers - 1) * config.avgPaymentMultiplier + // Other subscribers' weighted shares
-      multiplier * config.paymentMultiplier; // Our subscriber's weighted shares
-
-    // Calculate share of reward pool based on weighted shares and payment amount
-    const individualShare =
-      (multiplier * config.paymentMultiplier) / totalWeightedShares;
-    const monthlyReward = totalRewardPool * individualShare;
-    totalRewardsEarned += monthlyReward;
-
-    monthlyBreakdown.push({
-      month,
-      subscribers: Math.round(subscribers),
-      rewardPoolContribution: ourMonthlyContribution,
-      multiplier,
-      monthlyReward,
-      totalRewardPool,
-      clientFees: monthlyClientFees,
-      creatorEarnings: monthlyCreatorEarnings,
-    });
+    this.state = this.getInitialState();
   }
 
-  const roi = ((totalRewardsEarned - totalPaid) / totalPaid) * 100;
+  private getInitialState(): SubscriptionState {
+    return {
+      subscribers: new Map(),
+      rewardPool: 0,
+      totalShares: 0,
+      creatorBalance: 0,
+      protocolEarnings: 0,
+      clientEarnings: 0,
+    };
+  }
 
-  return {
-    totalPaid,
-    totalRewardsEarned,
-    totalClientFees,
-    totalCreatorEarnings,
-    roi,
-    monthlyBreakdown,
-  };
+  private calculateMultiplier(timestamp: number): number {
+    const periodsElapsed = Math.floor(
+      (timestamp - this.curve.startTimestamp) / ONE_MONTH_SECONDS
+    );
+
+    if (periodsElapsed >= this.curve.numPeriods) {
+      return this.curve.minMultiplier;
+    }
+
+    const multiplier = Math.pow(
+      this.curve.formulaBase,
+      this.curve.numPeriods - periodsElapsed
+    );
+
+    return Math.max(multiplier, this.curve.minMultiplier);
+  }
+
+  public addSubscriber({
+    address,
+    timestamp,
+    subscriptionDays,
+  }: {
+    address: string;
+    timestamp: number;
+    subscriptionDays: number;
+  }): void {
+    const subscriptionMonths = subscriptionDays / ONE_MONTH_DAYS;
+    const subscriptionSeconds = subscriptionMonths * ONE_MONTH_SECONDS;
+    const payment =
+      this.tier.initialMintPrice +
+      subscriptionMonths * this.tier.pricePerPeriod; // Fix: Calculate payment based on months, not seconds
+
+    const protocolFee = (payment * this.fees.protocolBps) / MAX_BPS;
+    const clientFee = (payment * this.fees.clientBps) / MAX_BPS;
+    const netPayment = payment - protocolFee - clientFee;
+
+    const rewardAmount = (netPayment * this.tier.rewardBasisPoints) / MAX_BPS;
+    const multiplier = this.calculateMultiplier(timestamp);
+    // Scale shares by subscription length to reward longer subscriptions
+    const shares = rewardAmount * multiplier * (subscriptionMonths / 12);
+
+    this.state.subscribers.set(address, {
+      tierId: 1,
+      subscriptionStart: timestamp,
+      expiresAt: timestamp + subscriptionSeconds,
+      rewardShares: shares,
+      totalSpent: payment,
+    });
+
+    this.state.totalShares += shares;
+    this.state.rewardPool += rewardAmount;
+    this.state.creatorBalance += netPayment - rewardAmount;
+    this.state.protocolEarnings += protocolFee;
+    this.state.clientEarnings += clientFee;
+  }
+
+  public calculateRewards(address: string, currentTimestamp: number): number {
+    const subscriber = this.state.subscribers.get(address);
+    if (!subscriber) return 0;
+
+    // Still calculate rewards even if expired - they earned them during their subscription
+    // Only check if the subscription hasn't started yet
+    if (currentTimestamp < subscriber.subscriptionStart) {
+      return 0;
+    }
+
+    const sharePercentage = subscriber.rewardShares / this.state.totalShares;
+    const totalRewards = this.state.rewardPool * sharePercentage;
+    return totalRewards;
+  }
+
+  public calculateROI(address: string, currentTimestamp: number) {
+    const subscriber = this.state.subscribers.get(address);
+    if (!subscriber)
+      return {
+        roi: 0,
+        spent: 0,
+        rewards: 0,
+      };
+
+    const rewards = this.calculateRewards(address, currentTimestamp);
+    // ROI calculation was incorrect - should be (rewards/spent - 1) * 100
+    // But we were calculating ((rewards/spent) * 100) - 1
+    return {
+      roi: (rewards / subscriber.totalSpent - 1) * 100,
+      spent: subscriber.totalSpent,
+      rewards,
+    };
+  }
+
+  public simulateScenario({
+    startTimestamp,
+    months,
+    monthlyGrowthRate,
+    testSubscriptionDays,
+  }: {
+    startTimestamp: number;
+    months: number;
+    monthlyGrowthRate: number;
+    testSubscriptionDays: number;
+  }): SimulationResult[] {
+    // Reset state for fresh simulation
+    this.state = this.getInitialState();
+
+    // Add initial subscribers
+    for (let i = 0; i < INITIAL_SUBSCRIBERS; i++) {
+      this.addSubscriber({
+        address: `subscriber-${i + 1}`,
+        timestamp: startTimestamp,
+        subscriptionDays: AVG_SUB_MONTHS * ONE_MONTH_DAYS,
+      });
+    }
+
+    // Add test subscriber at the start
+    const testAddress = "test-subscriber";
+    this.addSubscriber({
+      address: testAddress,
+      timestamp: startTimestamp,
+      subscriptionDays: testSubscriptionDays,
+    });
+
+    const results: SimulationResult[] = [];
+    let currentSubs = this.state.subscribers.size;
+
+    for (let month = 1; month <= months; month++) {
+      const timestamp = startTimestamp + month * ONE_MONTH_SECONDS;
+      const newSubs = Math.floor(currentSubs * monthlyGrowthRate);
+
+      // Add new subscribers
+      for (let i = 0; i < newSubs; i++) {
+        this.addSubscriber({
+          address: `subscriber-${this.state.subscribers.size + 1}`,
+          timestamp,
+          subscriptionDays: AVG_SUB_MONTHS * ONE_MONTH_DAYS,
+        });
+      }
+
+      // Calculate metrics
+      let totalRoi = 0;
+      let totalRewards = 0;
+      this.state.subscribers.forEach((_, address) => {
+        if (address !== testAddress) {
+          // Exclude test subscriber from averages
+          const analysis = this.calculateROI(address, timestamp);
+          totalRoi += analysis.roi;
+          totalRewards += analysis.rewards;
+        }
+      });
+
+      const regularSubCount = this.state.subscribers.size - 1; // Exclude test subscriber
+      const testAnalysis = this.calculateROI(testAddress, timestamp);
+
+      // Calculate total rewards including test subscriber
+      const testRewards = this.calculateRewards(testAddress, timestamp);
+      const totalPoolRewards = totalRewards + testRewards;
+
+      results.push({
+        month,
+        subscribers: regularSubCount,
+        avgRoi: totalRoi / regularSubCount,
+        creatorEarnings: this.state.creatorBalance,
+        clientEarnings: this.state.clientEarnings,
+        protocolEarnings: this.state.protocolEarnings,
+        subscriberRewards: totalPoolRewards, // Include all rewards
+        testSubscriberRoi: testAnalysis.roi,
+      });
+
+      currentSubs = regularSubCount;
+    }
+
+    return results;
+  }
 }
 
-// Example usage showing different payment scenarios
-console.log("\n=== Baseline (1x payment) ===");
-const baseResults = calculateRewards({
-  ...DEFAULT_CONFIG,
-  paymentMultiplier: 1,
-});
+// Initialize model with same parameters
+const startTime = Math.floor(Date.now() / 1000);
 
-console.log(`ROI: ${baseResults.roi.toFixed(2)}%`);
-console.log(
-  `Total Client Fees: $${formatCurrency(baseResults.totalClientFees)}`
-);
-console.log(
-  `Total Creator Earnings: $${formatCurrency(baseResults.totalCreatorEarnings)}`
-);
-console.log(
-  `Monthly reward (first month): $${baseResults.monthlyBreakdown[0].monthlyReward.toFixed(
-    2
-  )}`
-);
+const tier: TierConfig = {
+  rewardBasisPoints: 2_000, // 20%
+  initialMintPrice: 0,
+  pricePerPeriod: 5,
+};
 
-console.log("\n=== 2x Payment ===");
-const doubleResults = calculateRewards({
-  ...DEFAULT_CONFIG,
-  paymentMultiplier: 2,
-});
+const curve: CurveConfig = {
+  numPeriods: 60,
+  formulaBase: 1.2,
+  startTimestamp: startTime,
+  minMultiplier: 0,
+};
 
-console.log(`Total paid: $${formatCurrency(doubleResults.totalPaid)}`);
-console.log(
-  `Total Client Fees: $${formatCurrency(doubleResults.totalClientFees)}`
-);
-console.log(
-  `Total Creator Earnings: $${formatCurrency(
-    doubleResults.totalCreatorEarnings
-  )}`
-);
-console.log(`ROI: ${doubleResults.roi.toFixed(2)}%`);
-console.log(
-  `Total rewards earned: $${formatCurrency(doubleResults.totalRewardsEarned)}`
-);
+const fees: FeeConfig = {
+  protocolBps: 100, // 1%
+  clientBps: 500, // 5%
+};
 
-console.log("\n=== 5x Payment ===");
-const fiveXResults = calculateRewards({
-  ...DEFAULT_CONFIG,
-  paymentMultiplier: 5,
-});
+// Initialize model
+const model = new SubscriptionModel(tier, curve, fees);
 
-console.log(`Total paid: $${formatCurrency(fiveXResults.totalPaid)}`);
-console.log(
-  `Total Client Fees: $${formatCurrency(fiveXResults.totalClientFees)}`
-);
-console.log(
-  `Total Creator Earnings: $${formatCurrency(
-    fiveXResults.totalCreatorEarnings
-  )}`
-);
-console.log(`ROI: ${fiveXResults.roi.toFixed(2)}%`);
-console.log(
-  `Total rewards earned: $${formatCurrency(fiveXResults.totalRewardsEarned)}`
-);
+// Test different subscription lengths
+const subscriptionLengths = [
+  60, // 2 months
+  180, // 6 months
+  ONE_YEAR_DAYS, // 1 year
+  ONE_YEAR_DAYS * 2, // 2 years
+  ONE_YEAR_DAYS * 25, // Simulate yolo investment
+];
 
-console.log("\nDetailed Monthly Breakdown (all months with 5x payment):");
-console.log(
-  "\nMonth | Subscribers | Reward Pool | Multiplier | Rewards Earned | Client Fees | Creator Earnings"
-);
-console.log(
-  "-------|-------------|--------------|------------|----------------|-------------|----------------"
-);
-fiveXResults.monthlyBreakdown.forEach((month) => {
+// Run simulations for each scenario
+console.log("\nAnalyzing scenarios with different subscription lengths:");
+subscriptionLengths.forEach((days) => {
+  const results = model.simulateScenario({
+    startTimestamp: startTime,
+    months: curve.numPeriods,
+    monthlyGrowthRate: 0.15,
+    testSubscriptionDays: days,
+  });
+
+  // Output final month results
+  const finalResult = results[results.length - 1];
+  const testSub = model.state.subscribers.get("test-subscriber");
+  console.log(`\n${days} day subscription scenario:`);
   console.log(
-    `${month.month.toString().padStart(5)} | ` +
-      `${month.subscribers.toLocaleString().padEnd(11)} | ` +
-      `${formatCurrency(month.totalRewardPool).padEnd(10)} | ` +
-      `${month.multiplier.toFixed(2).padEnd(10)} | ` +
-      `${formatCurrency(month.monthlyReward).padEnd(12)} | ` +
-      `${formatCurrency(month.clientFees).padEnd(9)} | ` +
-      `${formatCurrency(month.creatorEarnings)}`
+    `- Final subscriber count: ${formatNum(finalResult.subscribers)}`
+  );
+  console.log(
+    `- Average ROI for regular subscribers: ${formatNum(finalResult.avgRoi)}%`
+  );
+  console.log(
+    `- Test subscriber spent: $${formatNum(testSub?.totalSpent || 0)}`
+  );
+  console.log(
+    `- Test subscriber shares: ${formatNum(testSub?.rewardShares || 0)}`
+  );
+  console.log(
+    `- Test subscriber rewards: $${formatNum(
+      model.calculateRewards(
+        "test-subscriber",
+        startTime + curve.numPeriods * ONE_MONTH_SECONDS
+      )
+    )}`
+  );
+  console.log(
+    `- Test subscriber ROI: ${formatNum(finalResult.testSubscriberRoi!)}%`
+  );
+  console.log(`- Creator earnings: $${formatNum(finalResult.creatorEarnings)}`);
+  console.log(
+    `- Total subscriber rewards: $${formatNum(finalResult.subscriberRewards)}`
   );
 });
